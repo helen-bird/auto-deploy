@@ -1,0 +1,25 @@
+# Mac mini 本机配置；复制到 ~/apps/my-project/config/deployment.yaml 后编辑。
+root: ~/apps/my-project
+repository:
+  url: https://github.com/OWNER/REPO.git
+  branch: main
+schedule:
+  timezone: Asia/Singapore
+  time: "09:00"
+  check_interval: daily
+deployment:
+  approval_required: true
+  install_command: auto
+  build_command: ""
+  command_timeout_seconds: 600
+service:
+  manager: launchd
+  name: com.helen.my-project
+  command: [python, main.py]
+health_check:
+  type: process
+  timeout_seconds: 60
+  interval_seconds: 5
+rollback:
+  enabled: true
+path: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
