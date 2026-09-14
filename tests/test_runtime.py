@@ -30,6 +30,17 @@ class RuntimeTest(DeploymentFixture, unittest.TestCase):
         self.assertNotIn('not-a-real-credential', log)
         self.assertFalse((self.m.state / 'service_process.json').exists())
 
+    def test_runner_stops_unbounded_line_without_logging_fragment(self):
+        self.first()
+        self.cfg['service']['command'] = [sys.executable, '-c',
+            'import os; os.write(1, b"private-fragment" * 100000)']
+        self.write_config()
+        p = self.runner()
+        self.assertNotEqual(p.returncode, 0)
+        log = (self.m.logs / 'service.log').read_text()
+        self.assertIn('output line exceeded', log)
+        self.assertNotIn('private-fragment', log)
+
     def test_runner_rejects_interrupted_transaction_even_during_check(self):
         self.first()
         self.cfg['service']['command'] = [sys.executable, '-c', 'raise RuntimeError("MUST_NOT_EXECUTE")']

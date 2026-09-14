@@ -63,7 +63,12 @@ def main():
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    for raw in iter(process.stdout.readline, b''):
+    # Bound a single line without leaking fragments of a secret across chunks.
+    for raw in iter(lambda: process.stdout.readline(1024 * 1024 + 1), b''):
+        if len(raw) > 1024 * 1024:
+            logger.error('Service output line exceeded 1 MiB; stopping child')
+            force_stop(None, None)
+            break
         logger.info(manager.redact(raw.decode(errors='replace').rstrip()))
     result = process.wait()
     if read_json(pid_file, {}).get('supervisor_pid') == os.getpid():

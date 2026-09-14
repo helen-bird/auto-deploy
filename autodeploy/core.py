@@ -2,6 +2,9 @@ import contextlib
 import datetime
 import fcntl
 import json
+import logging
+from logging.handlers import RotatingFileHandler
+import selectors
 import os
 from pathlib import Path
 import re
@@ -11,6 +14,16 @@ import tempfile
 import time
 import urllib.request
 import uuid
+
+
+COMMAND_OUTPUT_LIMIT = 8 * 1024 * 1024
+LOG_BYTES = 5_000_000
+HEALTH_BODY_LIMIT = 64 * 1024
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 class Error(RuntimeError):
@@ -137,8 +150,15 @@ class Manager:
     def log(self, event, **fields):
         entry = dict(timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(), stage=self.stage,
                      repository=self.cfg['repository']['url'], event=event, **fields)
-        with (self.logs / ('watcher.log' if self.stage == 'watch' else 'deployment.log')).open('a') as out:
-            out.write(json.dumps(self.scrub(entry), ensure_ascii=False) + '\n')
+        handler = RotatingFileHandler(self.logs / ('watcher.log' if self.stage == 'watch' else 'deployment.log'),
+                                      maxBytes=LOG_BYTES, backupCount=3, encoding='utf-8')
+        try:
+            message = json.dumps(self.scrub(entry), ensure_ascii=False)
+            if len(message.encode('utf-8')) > LOG_BYTES // 2:
+                message = json.dumps({'event': event, 'stage': self.stage, 'detail': 'Log entry omitted: size limit exceeded'})
+            handler.emit(logging.LogRecord('deployment', logging.INFO, '', 0, message, (), None))
+        finally:
+            handler.close()
 
     def run(self, args, cwd=None, check=True, timeout=None, secrets=False):
         start = time.monotonic()
@@ -148,20 +168,41 @@ class Manager:
                 env.pop(key, None)
         p = subprocess.Popen(args, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              start_new_session=True)
+        output, stderr = bytearray(), bytearray()
+        deadline = start + (timeout or self.cfg['deployment'].get('command_timeout_seconds', 600))
         try:
-            output, stderr = p.communicate(timeout=timeout or self.cfg['deployment'].get('command_timeout_seconds', 600))
-        except subprocess.TimeoutExpired:
-            os.killpg(p.pid, signal.SIGKILL)
-            output, stderr = p.communicate()
-            self.log('command_timeout', command=args, output=output.decode(errors='replace'), stderr=stderr.decode(errors='replace'), duration=time.monotonic()-start)
-            raise Error('Command timeout at ' + self.stage)
-        except BaseException:
+            with selectors.DefaultSelector() as selector:
+                selector.register(p.stdout, selectors.EVENT_READ, output)
+                selector.register(p.stderr, selectors.EVENT_READ, stderr)
+                while selector.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(args, timeout)
+                    for key, _ in selector.select(min(remaining, 0.2)):
+                        chunk = os.read(key.fileobj.fileno(), 65536)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        if len(output) + len(stderr) + len(chunk) > COMMAND_OUTPUT_LIMIT:
+                            raise Error('Command output exceeded 8 MiB at ' + self.stage)
+                        key.data.extend(chunk)
+                p.wait(timeout=max(0.001, deadline - time.monotonic()))
+        except BaseException as exc:
             try:
                 os.killpg(p.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            p.communicate()
+            p.wait()
+            # Do not log partial output: a secret may straddle the cutoff.
+            if isinstance(exc, subprocess.TimeoutExpired):
+                self.log('command_timeout', duration=time.monotonic()-start)
+                raise Error('Command timeout at ' + self.stage) from exc
+            if isinstance(exc, Error):
+                self.log('command_output_limit', duration=time.monotonic()-start)
             raise
+        finally:
+            p.stdout.close()
+            p.stderr.close()
         output = output.decode(errors='replace')
         self.log('command', command=args, exit_code=p.returncode, duration=time.monotonic()-start, output=output, stderr=stderr.decode(errors='replace'))
         if check and p.returncode:
@@ -323,8 +364,20 @@ class Manager:
                 elif h['type'] == 'http':
                     if not re.match(r'^http://(localhost|127\.0\.0\.1|\[::1\])(?=[:/])', h['url']):
                         raise Error('HTTP health check must use a loopback URL')
-                    with urllib.request.urlopen(h['url'], timeout=min(5, remaining)) as response:
-                        if response.status != 200 or json.load(response).get('status') != 'ok':
+                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+                    with opener.open(h['url'], timeout=min(5, remaining)) as response:
+                        body = bytearray()
+                        while len(body) <= HEALTH_BODY_LIMIT:
+                            if time.monotonic() >= deadline:
+                                raise Error('HTTP health response exceeded deadline')
+                            chunk = response.read1(min(8192, HEALTH_BODY_LIMIT + 1 - len(body)))
+                            if not chunk:
+                                break
+                            body.extend(chunk)
+                        if len(body) > HEALTH_BODY_LIMIT:
+                            raise Error('HTTP health response exceeds 64 KiB')
+                        payload = json.loads(body)
+                        if response.status != 200 or not isinstance(payload, dict) or payload.get('status') != 'ok':
                             raise Error('Unhealthy HTTP response')
                 else:
                     _, output = self.run(['/bin/launchctl', 'print', 'system/' + self.cfg['service']['name']], timeout=remaining)
