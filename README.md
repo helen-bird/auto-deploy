@@ -1,26 +1,53 @@
-# Mac mini 受控部署工具
+# auto-deploy · Mac 服务受控部署
 
-在 MacBook 开发，通过 GitHub 同步，在 Mac mini 上检查和部署业务项目。
+给运行在 Mac mini 或其他长期在线 Mac 上的个人服务使用的轻量部署工具。
 
-**发现更新 → 通知 → 用户批准完整 SHA → 安装/构建 → 重启 → 健康检查 → 成功记录或自动回滚。**
+**检查 GitHub main → 汇总变更 → 人工批准一个完整 SHA → 安装/构建 → 重启 → 健康检查 → 成功记录或自动回滚。**
 
-当前实现单个公开 GitHub 仓库、仅 `main`、强制人工批准、launchd 长期服务。部署工具和业务项目各有一个独立 checkout。不会给 MacBook 安装常驻服务，也不会替你上传 GitHub。
+适合个人机器人、小型 API 和由 launchd 管理的常驻任务。开发可以在另一台 Mac 或其他电脑完成；实际服务管理在 macOS 上运行。
+
+## 支持范围
+
+| 项目 | 当前支持 |
+|---|---|
+| 部署机器 | macOS，使用系统级 launchd；不直接支持 Linux/Windows |
+| 代码来源 | 配置指定的公开 GitHub 仓库，仅 main |
+| 项目数量 | 每份配置管理一个业务项目；没有统一多项目调度器 |
+| 安装依赖 | Python：uv.lock / requirements.txt / pyproject.toml；Node：package-lock.json |
+| 构建 | 本机配置 build_command；没有构建需求时留空 |
+| 健康检查 | 进程、HTTP、自定义命令 |
+| 更新通知与自然语言审批 | 使用 Codex 本地定时任务；CLI 可独立手动使用 |
+| 自动恢复 | 部署失败后恢复旧版本；中断或回滚失败需人工处理 |
+
+工具仓库与业务仓库是两个概念：先安装本工具，再配置要部署的业务项目。工具不会自动扫描账号下的仓库，也不提供自身的自动更新。私有业务仓库认证不在当前支持范围内。
 
 ## 快速开始
 
-MacBook 上可以直接运行开发验证：
+部署工具需要 Python 3.9+、Git 和 macOS 自带工具。业务项目另外需要相应的 Python、uv 或 Node/npm。
+
+在目标 Mac 上克隆并安装本工具（仓库仍为私有时需要 GitHub 访问权限）：
 
 ```bash
+mkdir -p ~/tools
+git clone https://github.com/helen-bird/auto-deploy.git ~/tools/auto-deploy
+cd ~/tools/auto-deploy
 ./scripts/setup.sh
-.venv/bin/python -m unittest discover -s tests -v
 ./scripts/autodeploy.sh --help
 ```
 
-部署工具需要 Python 3.9+、Git 和 macOS 自带工具；setup.sh 会在工具目录的独立 .venv 中安装固定版本 PyYAML，用于安全读取 YAML 配置。业务项目根据需要使用 uv、Python 或 Node/npm。
+setup.sh 在工具目录的独立 .venv 中安装固定版本 PyYAML。不要从其他机器复制虚拟环境。
 
-Mac mini 安装流程见 **[安装指南](docs/mac-mini-setup.md)**。复制 [配置模板](deployment.example.yaml)，填业务仓库地址、应用目录、启动命令和健康检查，初始化后安装 launchd 服务。最后在 Mac mini 的 Codex 本地任务中启用定时检查。
+然后按照 **[安装指南](docs/mac-mini-setup.md)** 完成：
 
-`deployment.yaml` 支持常规 YAML 和 JSON，使用安全解析器，不执行 YAML 中的对象构造指令。调度默认保持 TRD 的每天 09:00 Asia/Singapore，可配置。
+1. 复制 [配置模板](deployment.example.yaml)，填写业务仓库地址、应用目录、服务名称、启动命令及健康检查。
+2. 在应用目录的 config/.env 中配置本机密钥，不提交到 Git。
+3. 初始化目录并检查更新；这一步不会部署或运行业务代码。
+4. 查看并安装 launchd 配置，明确批准首次部署的完整 SHA。
+5. 如需通知和自然语言审批，再配置 Codex 定时任务。
+
+不使用 Codex 时也可以手动运行 check，查看输出后调用 deploy。检查脚本不会自己发通知或等待输入；配置中的 schedule 也不会单独安装一个系统定时器。完整定时检查、摘要和通知由 Codex 任务提供。
+
+`deployment.yaml` 支持常规 YAML 和 JSON，采用安全解析器。调度模板默认每天 09:00 Asia/Singapore，可在本机配置；修改配置后还需更新已经创建的定时任务。
 
 ## 命令
 
@@ -35,7 +62,7 @@ Mac mini 安装流程见 **[安装指南](docs/mac-mini-setup.md)**。复制 [�
 ./scripts/autodeploy.sh --config /absolute/path/deployment.yaml recover
 ```
 
-也保留 TRD 中的 `bootstrap.sh`、`check_update.sh`、`analyze_update.sh`、`deploy.sh <SHA>`、`rollback.sh` 和 `health_check.sh` 入口；这些入口读取 `DEPLOY_CONFIG`，未设置时读取当前目录的 `deployment.yaml`。
+兼容 shell 入口包括 `bootstrap.sh`、`check_update.sh`、`analyze_update.sh`、`deploy.sh <SHA>`、`rollback.sh` 和 `health_check.sh` 入口；这些入口读取 `DEPLOY_CONFIG`，未设置时读取当前目录的 `deployment.yaml`。
 
 `deploy <SHA>` 命令本身代表操作者的明确批准，必须由你或接到你明确指令的 Codex 调用。脚本要求这个完整 SHA 已经被 check 检测到，不会把 SHA 换成最新 main。自然语言授权由 Codex 任务处理，CLI 不会自行推断人的批准。
 
@@ -44,7 +71,7 @@ Mac mini 安装流程见 **[安装指南](docs/mac-mini-setup.md)**。复制 [�
 ## 目录与状态
 
 ```text
-~/tools/auto-deploy/           # 本工具，只在 MacBook 开发
+~/tools/auto-deploy/           # 部署工具，与业务工作树分离
 ~/apps/my-project/
   config/deployment.yaml      # Mac mini 本机配置
   config/.env                 # mode 600，只保存本机
@@ -79,8 +106,23 @@ Mac mini 安装流程见 **[安装指南](docs/mac-mini-setup.md)**。复制 [�
 - 回滚恢复代码、依赖与构建，不逆转数据库迁移或外部副作用。此类项目必须提供可回滚的部署步骤，否则不能认为满足该项目的回滚验收。
 - 程序被强制终止或机器掉电后不会自行把中断操作当成功；后续部署被阻止，需明确 recover。常规成功版本重启可由 launchd 恢复。
 
-## 验证状态
+## 验证状态与开发
 
-本地测试覆盖真实 Git 仓库与实际 shell 命令，launchd 管理在自动测试中使用测试适配器，不会注册本机服务。详见 [验收清单](docs/acceptance.md)。Mac mini 的 GitHub 通知、真实 launchd、开机恢复、成功/失败端到端验证仍必须在目标机器上完成；完成前不宣称整套 MVP 已验收。
+维护者已反馈在 Mac mini 完成实机验收、运行无异常。该反馈与自动化测试记录分开保存：没有把未提供的机器配置、日志或逐项结果推定为已核验。其他使用者仍应按 [验收清单](docs/acceptance.md) 验证自己的项目。
 
-[TRD](TRD.md) 保留原始要求；没有把上述待验收项目从范围中删除。
+2026-09-10 的开发验证记录为 26 项测试通过，覆盖真实临时 Git 仓库、本机 HTTP 健康检查、子进程、失败回滚与中断恢复。自动测试中的 launchd 管理使用测试适配器，不会注册系统服务。
+
+```bash
+./scripts/setup.sh
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+测试会临时监听本机回环地址；受限沙箱可能需要允许本地监听。部署默认不运行项目测试：需要部署前测试时，可在项目自己的构建步骤中配置。
+
+[TRD](TRD.md) 是原始设计记录，保留历史示例；实际安装以本 README、配置模板和安装指南为准。
+
+## 贡献与许可证
+
+欢迎提交问题和改进。提交问题时请说明 macOS、Python 版本、失败阶段及脱敏错误信息；不要附带真实 .env、访问令牌或完整生产日志。修改审批、来源验证、回滚或状态管理时，请同时提供相应回归测试。
+
+本项目采用 [MIT License](LICENSE)，版权署名为 helen-bird。外部依赖仍遵循各自许可证；PyYAML 由安装脚本下载，不打包进本仓库。

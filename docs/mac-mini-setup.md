@@ -1,10 +1,10 @@
 # Mac mini 安装与日常操作
 
-## 1. 在 MacBook 上准备 GitHub 仓库
+## 1. 区分工具仓库与业务仓库
 
-把本工具目录提交到你自己的 GitHub 仓库。业务项目可以是另一个公开仓库；配置里的 repository.url 指向**业务仓库**，而不是默认指向本工具。
+本工具仓库是 `helen-bird/auto-deploy`，业务仓库是你要部署的应用。配置里的 repository.url 指向**业务仓库**，当前支持公开 GitHub 仓库的 main 分支。使用本工具无需先 fork；需要修改工具源码时再 fork。
 
-上传前检查 git diff --cached，确认没有本机配置、密钥或运行数据。工具已经提供 .gitignore；Git 不会自动停止跟踪之前误提交的文件。
+日常在开发机器修改业务代码并推送 GitHub，目标 Mac 按已批准 SHA 更新。业务仓库必须自行排除密钥和运行数据；本工具的 .gitignore 不会自动作用到业务仓库。
 
 ## 2. Mac mini 的一次性准备
 
@@ -16,11 +16,11 @@ python3 --version
 command -v python3
 ```
 
-建议把工具放在稳定目录，不放在 Desktop、Documents 或 Downloads 等可能受 macOS 隐私权限影响的目录。下面的 OWNER/auto-deploy 是占位符，替换成你的工具仓库：
+建议把工具放在稳定目录，不放在 Desktop、Documents 或 Downloads 等可能受 macOS 隐私权限影响的目录。以下命令克隆本工具；使用 fork 时替换克隆地址：
 
 ```bash
 mkdir -p ~/tools
-git clone https://github.com/OWNER/auto-deploy.git ~/tools/auto-deploy
+git clone https://github.com/helen-bird/auto-deploy.git ~/tools/auto-deploy
 cd ~/tools/auto-deploy
 ./scripts/setup.sh
 .venv/bin/python -m unittest discover -s tests -v
@@ -34,7 +34,7 @@ chmod 600 ~/apps/my-project/config/deployment.yaml
 
 - root：例如 `~/apps/my-project`，不要和工具目录重叠。
 - repository.url：业务项目的公开 GitHub HTTPS 地址；branch 固定 main。
-- service.name：本机唯一 label，例如 com.helen.my-project。
+- service.name：本机唯一 label，例如 com.example.my-project。模板中的历史示例名称必须按项目自行设置，已经运行的服务不要仅为改名而修改 label。
 - service.command：前台启动的 argv 数组，不是 shell 字符串，不能带 `&`。
 - deployment.build_command：例如 `npm run build`，无构建则保持空字符串。
 - health_check：按下面示例配置。
@@ -98,7 +98,7 @@ sudo "$PWD/.venv/bin/python" scripts/install_service.py \
 
 部署顺序是锁 → 验证 → 停服务 → checkout 指定 SHA → 安装 → 构建 → 启动 → 健康检查。首次启动成功后写入 deployed_sha。失败时不会冒充成功；首次部署没有可回滚版本。
 
-## 6. 在 Mac mini 上启用 Codex 定时任务
+## 6. 可选：在目标 Mac 上启用 Codex 定时任务
 
 在 Mac mini 的桌面应用中打开一个以本工具为上下文的本地任务，确保它能访问 `~/apps/my-project` 及 GitHub 网络。运行：
 
@@ -106,7 +106,7 @@ sudo "$PWD/.venv/bin/python" scripts/install_service.py \
 ./scripts/autodeploy.sh --config "$DEPLOY_CONFIG" automation-prompt
 ```
 
-把生成的文字粘贴到该 Mac mini 任务，让应用创建**回到同一任务的定时检查**。提示词已包含绝对工具/配置路径、时间、时区、通知去重、严格审批 SHA 和故障处理。检查任务所属机器与下一次触发时间，手动运行一次核对输出。此项目不会在 MacBook 上注册一个假装在 Mac mini 执行的任务。
+把生成的文字粘贴到该 Mac mini 任务，让应用创建**回到同一任务的定时检查**。提示词已包含绝对工具/配置路径、时间、时区、通知去重、严格审批 SHA 和故障处理。检查任务所属机器与下一次触发时间，手动运行一次核对输出。任务必须在服务所在的目标 Mac 上创建，不能用开发机器上的任务代替。
 
 配置文件 schedule 是创建任务时的输入；修改它不会自动修改已存在的桌面任务。修改后重新生成提示词，要求更新原任务，避免重复创建。
 
@@ -118,24 +118,22 @@ sudo "$PWD/.venv/bin/python" scripts/install_service.py \
 
 HTTP 服务建议使用接口检查，返回 HTTP 200 且 JSON 中 status 为 ok：
 
-```json
-"health_check": {
-  "type": "http",
-  "url": "http://127.0.0.1:8080/health",
-  "timeout_seconds": 60,
-  "interval_seconds": 5
-}
+```yaml
+health_check:
+  type: http
+  url: http://127.0.0.1:8080/health
+  timeout_seconds: 60
+  interval_seconds: 5
 ```
 
 无 HTTP 的任务可以提供业务级检查脚本：
 
-```json
-"health_check": {
-  "type": "command",
-  "command": "python scripts/health_check.py",
-  "timeout_seconds": 60,
-  "interval_seconds": 5
-}
+```yaml
+health_check:
+  type: command
+  command: python scripts/health_check.py
+  timeout_seconds: 60
+  interval_seconds: 5
 ```
 
 命令在业务 repo 中执行，退出码 0 代表健康。也支持模板中的 process：验证 launchd 包装器及业务子进程存在，但进程存在不等于业务可用，能提供接口或业务检查时应使用它们。
